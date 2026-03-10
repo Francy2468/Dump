@@ -295,9 +295,6 @@ local function at(O, au)
     local ax = #aw + 1
     if t.current_size + ax > r.MAX_OUTPUT_SIZE then
         t.limit_reached = true
-        local ay = "-- [CRITICAL] Dump stopped: File size limit exceeded."
-        table.insert(t.output, ay)
-        t.current_size = t.current_size + #ay
         error("TIMEOUT_FORCED_BY_DUMPER: output size limit reached")
     end
     -- Cycle-aware repetition suppressor: detects repeating blocks of 1, 2 or 3 lines.
@@ -2937,7 +2934,6 @@ task = {
                     dr(unpack(bA))
                 end,
                 function(ds)
-                    at("-- [Error in spawn] " .. tostring(ds))
                 end
             )
         end
@@ -3168,7 +3164,6 @@ local exploit_funcs = {getgenv = function()
             return dK
         end
         local orig_name = t.registry[dK] or "unknown_fn"
-        at(string.format("-- [hookfunction] %s was hooked", orig_name))
         -- Store hook for deferred execution after main VM run (captures hooks never called by script)
         table.insert(t.deferred_hooks, {name = orig_name, fn = dL})
         -- Return the hook so when the "original" is called, the hook runs
@@ -3179,7 +3174,6 @@ local exploit_funcs = {getgenv = function()
         end
         local obj_name = t.registry[x] or "object"
         local method_str = aE(dM)
-        at(string.format("-- [hookmetamethod] %s.%s hooked", obj_name, method_str))
         table.insert(t.deferred_hooks, {name = obj_name .. "." .. method_str, fn = dN})
         return dN
     end, replaceclosure = function(dK, dL)
@@ -3187,7 +3181,6 @@ local exploit_funcs = {getgenv = function()
             return dK
         end
         local orig_name = t.registry[dK] or "unknown_fn"
-        at(string.format("-- [replaceclosure] %s replaced", orig_name))
         table.insert(t.deferred_hooks, {name = orig_name .. " (replaceclosure)", fn = dL})
         return dL
     end, getrawmetatable = function(x)
@@ -4070,107 +4063,14 @@ end
 -- table) and emits every key/value pair written by the script.
 function q.dump_captured_globals(env_table, baseline_keys)
     if not r.DUMP_GLOBALS then return end
-    local function safe_key(gk)
-        return gk:match("^[%a_][%w_]*$") and gk or ("[" .. aH(gk) .. "]")
-    end
-    local found = 0
     aA()
-    az("=== Captured Global Variables ===")
-    -- eC is the real global table (before it was wrapped by the eD proxy).
-    -- The script's global writes all end up in eC via eD.__newindex.
-    local sources = {}
-    if j(eC) == "table" then sources[1] = eC end
-    if j(env_table) == "table" then sources[#sources + 1] = env_table end
-    local already_emitted = {}
-    for _, src in E(sources) do
-        for gk, gv in D(src) do
-            if j(gk) == "string" and not baseline_keys[gk] and not already_emitted[gk] then
-                already_emitted[gk] = true
-                local gvt = j(gv)
-                local sk = safe_key(gk)
-                if gvt == "string" or gvt == "number" or gvt == "boolean" then
-                    at("-- global: " .. sk .. " = " .. aZ(gv))
-                    found = found + 1
-                elseif gvt == "table" then
-                    at("-- global table: " .. sk .. " = " .. aZ(gv, 0, {}, true))
-                    found = found + 1
-                elseif gvt == "function" then
-                    at("-- global function: " .. sk)
-                    found = found + 1
-                end
-            end
-        end
-    end
-    if found == 0 then
-        az("(no new globals detected)")
-    else
-        az("Total new globals: " .. found)
-    end
 end
 
 -- Extract and emit all upvalues from every function captured in the registry.
 function q.dump_captured_upvalues()
     if not r.DUMP_UPVALUES then return end
     if not a or not a.getupvalue then return end
-    local emitted = 0
     aA()
-    az("=== Captured Upvalues ===")
-    local seen_funcs = {}
-    -- Helper: scan upvalues of a single function and emit serializable ones.
-    -- Serializable = string, number, boolean, or table (excluding _ENV and
-    -- tables already tracked in the call-graph registry).
-    local function scan_upvalues(obj, name)
-        if seen_funcs[obj] then return end
-        seen_funcs[obj] = true
-        local idx = 1
-        while true do
-            local uv_name, uv_val = a.getupvalue(obj, idx)
-            if not uv_name then break end
-            -- Skip _ENV upvalue – it is just the global environment table.
-            if uv_name ~= "_ENV" then
-                local uvt = j(uv_val)
-                if uvt == "string" or uvt == "number" or uvt == "boolean" then
-                    at("-- upvalue [" .. name .. "][" .. uv_name .. "] = " .. aZ(uv_val))
-                    emitted = emitted + 1
-                elseif uvt == "table" and not t.registry[uv_val] then
-                    at("-- upvalue [" .. name .. "][" .. uv_name .. "] (table) = " .. aZ(uv_val, 0, {}, true))
-                    emitted = emitted + 1
-                end
-            end
-            idx = idx + 1
-            if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
-        end
-    end
-    -- Scan functions already captured in the call-graph registry (populated by
-    -- the LARRY_CALL instrumentation hook for explicitly traced function calls).
-    for obj, name in D(t.registry) do
-        if j(obj) == "function" then
-            scan_upvalues(obj, name)
-        end
-    end
-    -- Also scan functions found in the global environment (eC).
-    -- This catches globals defined by non-instrumented scripts (plain Lua,
-    -- WeAreDevs-obfuscated, etc.) whose calls were never routed through
-    -- LARRY_CALL and therefore were not added to the registry above.
-    -- Only scan keys that the script wrote after the pre-execution snapshot
-    -- (stored in t.pre_exec_keys) so we don't iterate standard-library functions.
-    if j(eC) == "table" then
-        local baseline = t.pre_exec_keys or {}
-        local function is_new_user_function(gk, gv)
-            return j(gk) == "string" and not baseline[gk]
-                   and j(gv) == "function" and not seen_funcs[gv]
-        end
-        for gk, gv in D(eC) do
-            if is_new_user_function(gk, gv) then
-                scan_upvalues(gv, gk)
-            end
-        end
-    end
-    if emitted == 0 then
-        az("(no upvalues captured)")
-    else
-        az("Total upvalues: " .. emitted)
-    end
 end
 
 -- Emit a summary of all string constants collected during execution.
@@ -4178,13 +4078,6 @@ function q.dump_string_constants()
     if not r.DUMP_ALL_STRINGS then return end
     if #t.string_refs == 0 then return end
     aA()
-    az("=== Captured String Constants ===")
-    for si, sr in E(t.string_refs) do
-        local hint = sr.hint and (" [" .. sr.hint .. "]") or ""
-        local val = sr.full_length and (sr.value .. " (full length: " .. sr.full_length .. ")") or sr.value
-        at("-- string #" .. si .. hint .. ": " .. aH(val))
-    end
-    az("Total strings: " .. #t.string_refs)
 end
 
 -- Emit the decoded WeAreDevs string pool when available.
@@ -4193,11 +4086,6 @@ function q.dump_wad_strings()
     local pool = t.wad_string_pool
     if not pool.strings or #pool.strings == 0 then return end
     aA()
-    az("=== Decoded WeAreDevs String Pool ===")
-    az(string.format("Total strings in pool: %d | Printable ASCII: %d", pool.total, #pool.strings))
-    for _, entry in E(pool.strings) do
-        az(string.format("[%d] %s", entry.idx, aH(entry.val)))
-    end
 end
 
 -- Execute deferred hooks/callbacks that were registered via hookfunction/Connect etc.
@@ -4212,7 +4100,6 @@ function q.run_deferred_hooks()
     for _, entry in E(hooks) do
         if j(entry.fn) == "function" and not t.limit_reached then
             aA()
-            az("-- [deferred hook: " .. (entry.name or "?") .. "]")
             local hook_lines = br(entry.fn, entry.args or {})
             for _, hl in ipairs(hook_lines) do
                 at(hl, true)
@@ -4222,7 +4109,6 @@ function q.run_deferred_hooks()
     end
     if ran > 0 then
         aA()
-        az("-- [" .. ran .. " deferred hook(s) executed]")
     end
 end
 

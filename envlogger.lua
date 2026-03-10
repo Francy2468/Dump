@@ -2379,9 +2379,8 @@ local exploit_funcs = {getgenv = function()
         at(string.format("HttpPost(%s, %s)", aE(cI), aE(cJ)))
         return "{}"
     end, setclipboard = function(cJ)
-        at(string.format("setclipboard(%s)", aZ(cJ)))
     end, getclipboard = function()
-        return '"'
+        return ""
     end, identifyexecutor = function()
         return "Dumper", "3.0"
     end, getexecutorname = function()
@@ -2421,12 +2420,9 @@ local exploit_funcs = {getgenv = function()
     end, getcallingscript = function()
         return script
     end, readfile = function(dA)
-        at(string.format("readfile(%s)", aH(dA)))
-        return '"'
+        return ""
     end, writefile = function(dA, ai)
-        at(string.format("writefile(%s, %s)", aH(dA), aZ(ai)))
     end, appendfile = function(dA, ai)
-        at(string.format("appendfile(%s, %s)", aH(dA), aZ(ai)))
     end, loadfile = function(dA)
         return function()
             return bj("loaded_file", false)
@@ -2438,11 +2434,8 @@ local exploit_funcs = {getgenv = function()
     end, isfolder = function(dA)
         return false
     end, makefolder = function(dA)
-        at(string.format("makefolder(%s)", aH(dA)))
     end, delfolder = function(dA)
-        at(string.format("delfolder(%s)", aH(dA)))
     end, delfile = function(dA)
-        at(string.format("delfile(%s)", aH(dA)))
     end, Drawing = {new = function(aO)
             local dY = aE(aO)
             local x = bj("Drawing_" .. dY, false)
@@ -3310,17 +3303,6 @@ local function wad_extract_strings(source_code)
     return results, #w_tbl, lookup
 end
 
--- Emit clipboard-related preamble lines when the string pool contains the
--- clipboard API names used by WeAreDevs-obfuscated Roblox scripts.
-local function wad_emit_clipboard_hints(lookup)
-    if not lookup then return end
-    if lookup["setclipboard"] or lookup["toclipboard"] or lookup["Clipboard"] then
-        az("Clipboard API detected in string pool:")
-        at("local setclip = setclipboard or toclipboard or (Clipboard and Clipboard.set)")
-        aA()
-    end
-end
-
 function q.dump_file(eN, eO)
     q.reset()
     az("generated with catmio | https://discord.gg/cq9GkRKX2V")
@@ -3330,24 +3312,16 @@ function q.dump_file(eN, eO)
     end
     local al = as:read("*a")
     as:close()
-    -- WeAreDevs-specific: extract and log all decoded string constants before
-    -- executing the VM so analysts can see the full constant pool.
     if al:find("wearedevs%.net/obfuscator", 1, false) then
-        az("WeAreDevs v1.0.0 obfuscation detected")
-        B("[Dumper] WeAreDevs obfuscation detected – extracting string table...")
         local wad_strings, wad_total, wad_lookup = wad_extract_strings(al)
         if wad_strings then
-            az(string.format("String pool: %d total entries, %d readable ASCII strings",
-                wad_total or 0, #wad_strings))
-            az("Decoded string constants:")
-            for _, entry in ipairs(wad_strings) do
-                az(string.format("  [%d] = %q", entry.idx, entry.val))
-            end
-            aA()
-            -- Emit preamble hints derived from the string pool
-            wad_emit_clipboard_hints(wad_lookup)
+            t.wad_string_pool = {
+                strings = wad_strings,
+                total = wad_total or 0,
+                lookup = wad_lookup
+            }
         else
-            az("String pool extraction failed – running execution trace only")
+            t.wad_string_pool = nil
         end
     end
     B("[Dumper] Sanitizing Luau and Binary Literals...")

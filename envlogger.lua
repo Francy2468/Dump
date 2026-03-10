@@ -819,13 +819,15 @@ local function br(bs, bt)
     local a4 = #t.output
     local bu = t.pending_iterator
     t.pending_iterator = false
-    xpcall(
+    local _br_ok, _br_err = xpcall(
         function()
             bs(unpack(bt or {}))
         end,
-        function()
-        end
+        function(err) return err end
     )
+    if not _br_ok and type(_br_err) == "string" and _br_err:find("TIMEOUT_FORCED_BY_DUMPER", 1, true) then
+        error(_br_err, 0)
+    end
     while t.pending_iterator do
         t.indent = t.indent - 1
         at("end")
@@ -3929,7 +3931,6 @@ function q.dump_file(eN, eO)
     if not eN then return false end
     q.reset()
     az("generated with catmio | https://discord.gg/cq9GkRKX2V")
-    az("source: " .. eN)
     local as = o.open(eN, "rb")
     if not as then
         return false
@@ -4027,8 +4028,8 @@ function q.dump_file(eN, eO)
                 if p.clock() - eT > r.TIMEOUT_SECONDS then
                     error("TIMEOUT_FORCED_BY_DUMPER", 0)
                 end
-                for _level = 2, 6 do
-                    local _info = a.getinfo(_level, "S")
+                for _level = 2, 4 do
+                    local _info = a.getinfo(_level, "f")
                     if not _info then break end
                     local _idx = 1
                     while true do
@@ -4043,7 +4044,7 @@ function q.dump_file(eN, eO)
                 end
             end,
             "",
-            10
+            30
         )
     else
         b(
@@ -4066,28 +4067,6 @@ function q.dump_file(eN, eO)
         end
     )
     b()
-    if not eo then
-        az("Terminated: " .. eU)
-    end
-    -- Emit summary section
-    local eV = q.get_stats()
-    aA()
-    az(string.format("[Summary] Lines: %d | Remote calls: %d | Suspicious strings: %d | Proxies: %d",
-        eV.total_lines, eV.remote_calls, eV.suspicious_strings, eV.proxies_created))
-    if #t.string_refs > 0 then
-        aA()
-        az("[String References]")
-        for _, sr in ipairs(t.string_refs) do
-            az(string.format("  [%s] %s", sr.hint or "?", sr.value))
-        end
-    end
-    if #t.call_graph > 0 then
-        aA()
-        az("[Remote Calls]")
-        for _, cg in ipairs(t.call_graph) do
-            az(string.format("  [%s] %s", cg.type or "?", cg.name or "?"))
-        end
-    end
     return q.save(eO or r.OUTPUT_FILE)
 end
 function q.dump_string(al, eO)
@@ -4099,7 +4078,6 @@ function q.dump_string(al, eO)
     end
     local R, an = e(al)
     if not R then
-        az("Load Error: " .. (an or "unknown"))
         return false, an
     end
     local eT2 = p.clock()
@@ -4113,9 +4091,6 @@ function q.dump_string(al, eO)
         function(ds) return tostring(ds) end
     )
     b()
-    if not eo2 and eU2 then
-        az("Terminated: " .. eU2)
-    end
     if eO then
         return q.save(eO)
     end

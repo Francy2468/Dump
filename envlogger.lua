@@ -4116,13 +4116,18 @@ function q.dump_captured_upvalues()
     aA()
     az("=== Captured Upvalues ===")
     local seen_funcs = {}
-    for obj, name in D(t.registry) do
-        if j(obj) == "function" and not seen_funcs[obj] then
-            seen_funcs[obj] = true
-            local idx = 1
-            while true do
-                local uv_name, uv_val = a.getupvalue(obj, idx)
-                if not uv_name then break end
+    -- Helper: scan upvalues of a single function and emit serializable ones.
+    -- Serializable = string, number, boolean, or table (excluding _ENV and
+    -- tables already tracked in the call-graph registry).
+    local function scan_upvalues(obj, name)
+        if seen_funcs[obj] then return end
+        seen_funcs[obj] = true
+        local idx = 1
+        while true do
+            local uv_name, uv_val = a.getupvalue(obj, idx)
+            if not uv_name then break end
+            -- Skip _ENV upvalue – it is just the global environment table.
+            if uv_name ~= "_ENV" then
                 local uvt = j(uv_val)
                 if uvt == "string" or uvt == "number" or uvt == "boolean" then
                     at("-- upvalue [" .. name .. "][" .. uv_name .. "] = " .. aZ(uv_val))
@@ -4131,8 +4136,33 @@ function q.dump_captured_upvalues()
                     at("-- upvalue [" .. name .. "][" .. uv_name .. "] (table) = " .. aZ(uv_val, 0, {}, true))
                     emitted = emitted + 1
                 end
-                idx = idx + 1
-                if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
+            end
+            idx = idx + 1
+            if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
+        end
+    end
+    -- Scan functions already captured in the call-graph registry (populated by
+    -- the LARRY_CALL instrumentation hook for explicitly traced function calls).
+    for obj, name in D(t.registry) do
+        if j(obj) == "function" then
+            scan_upvalues(obj, name)
+        end
+    end
+    -- Also scan functions found in the global environment (eC).
+    -- This catches globals defined by non-instrumented scripts (plain Lua,
+    -- WeAreDevs-obfuscated, etc.) whose calls were never routed through
+    -- LARRY_CALL and therefore were not added to the registry above.
+    -- Only scan keys that the script wrote after the pre-execution snapshot
+    -- (stored in t.pre_exec_keys) so we don't iterate standard-library functions.
+    if j(eC) == "table" then
+        local baseline = t.pre_exec_keys or {}
+        local function is_new_user_function(gk, gv)
+            return j(gk) == "string" and not baseline[gk]
+                   and j(gv) == "function" and not seen_funcs[gv]
+        end
+        for gk, gv in D(eC) do
+            if is_new_user_function(gk, gv) then
+                scan_upvalues(gv, gk)
             end
         end
     end
@@ -4159,8 +4189,15 @@ end
 
 -- Emit the decoded WeAreDevs string pool when available.
 function q.dump_wad_strings()
-    -- WAD string pool is used internally for VM execution but NOT emitted to output.
-    -- The decoded strings are already surfaced through the normal execution trace.
+    if not t.wad_string_pool then return end
+    local pool = t.wad_string_pool
+    if not pool.strings or #pool.strings == 0 then return end
+    aA()
+    az("=== Decoded WeAreDevs String Pool ===")
+    az(string.format("Total strings in pool: %d | Printable ASCII: %d", pool.total, #pool.strings))
+    for _, entry in E(pool.strings) do
+        az(string.format("[%d] %s", entry.idx, aH(entry.val)))
+    end
 end
 
 -- Execute deferred hooks/callbacks that were registered via hookfunction/Connect etc.
@@ -4417,6 +4454,8 @@ function q.dump_file(eN, eO)
     local _pre_exec_keys = {}
     for _k in D(eC) do _pre_exec_keys[_k] = true end
     for _k in D(eR) do _pre_exec_keys[_k] = true end
+    -- Store baseline so dump_captured_upvalues can filter new-vs-pre-existing globals.
+    t.pre_exec_keys = _pre_exec_keys
     B("[Dumper] Executing Protected VM...")
     local eT = p.clock()
     local _is_wad = (t.wad_string_pool ~= nil)
@@ -4477,6 +4516,7 @@ function q.dump_file(eN, eO)
     q.dump_captured_globals(eR, _pre_exec_keys)
     q.dump_captured_upvalues()
     q.dump_string_constants()
+    q.dump_wad_strings()
     return q.save(eO or r.OUTPUT_FILE)
 end
 function q.dump_string(al, eO)
@@ -4490,6 +4530,11 @@ function q.dump_string(al, eO)
     if not R then
         return false, an
     end
+    -- Snapshot globals before execution so dump_captured_upvalues knows which
+    -- globals are new (written by the script) vs pre-existing standard library.
+    local _pre_exec_keys = {}
+    for _k in D(eC) do _pre_exec_keys[_k] = true end
+    t.pre_exec_keys = _pre_exec_keys
     local eT2 = p.clock()
     b(function()
         if p.clock() - eT2 > r.TIMEOUT_SECONDS then

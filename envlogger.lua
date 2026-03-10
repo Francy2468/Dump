@@ -289,7 +289,7 @@ local function at(O, au)
     local ax = #aw + 1
     if t.current_size + ax > r.MAX_OUTPUT_SIZE then
         t.limit_reached = true
-        local ay = "-- [CRITICAL] Dump stopped: File size exceeded 6MB limit."
+        local ay = "-- [CRITICAL] Dump stopped: File size limit exceeded."
         table.insert(t.output, ay)
         t.current_size = t.current_size + #ay
         error("DUMP_LIMIT_EXCEEDED")
@@ -864,7 +864,7 @@ bk = function(aS, bw)
                         bd = "[" .. aZ(bG) .. "]"
                     end
                     if bG == bE and #bJ > 0 then
-                        local bL = bI ~= '"' and "function(" .. "bI" .. ")" or "function()"
+                        local bL = bI ~= '"' and "function(" .. bI .. ")" or "function()"
                         local bb = string.rep("    ", t.indent + 2)
                         local bM = {}
                         for W, aw in ipairs(bJ) do
@@ -3259,19 +3259,26 @@ end
 -- Runs only the decode phase of a WeAreDevs-obfuscated file to produce
 -- a table of all decoded string constants, then emits them as comments
 -- at the top of the dump so the caller can identify the original names.
+--
+-- In WeAreDevs v1.0.0 the decoded string table ends with three closing
+-- "end" keywords followed immediately by the inner-VM function definition:
+--   "end end end return(function(w,j,e,...)"
+-- This pattern is used to split off the decode phase from the VM body.
+local WAD_DECODE_BOUNDARY = "end end end return%(function%([^)]*%)"
+-- Length of the literal prefix "end end end" that we keep (11 chars, 0-indexed = 10).
+local WAD_DECODE_PREFIX_LEN = 10
 local function wad_extract_strings(source_code)
     if not source_code:find("wearedevs%.net/obfuscator", 1, false) then
         return nil
     end
     -- Find the boundary between the decode block and the inner VM function.
-    -- Pattern: "end end end return(function(" marks the end of the decode phase.
-    local boundary = source_code:find("end end end return%(function%([^)]*%)")
+    local boundary = source_code:find(WAD_DECODE_BOUNDARY)
     if not boundary then
         return nil
     end
-    -- Inject "return w" right after the decode block ends so we get the
+    -- Inject "return w" right after "end end end" so we get the
     -- fully-decoded string table without running the VM itself.
-    local patched = source_code:sub(1, boundary + 10) .. "\nreturn w\nend)()\n"
+    local patched = source_code:sub(1, boundary + WAD_DECODE_PREFIX_LEN) .. "\nreturn w\nend)()\n"
     local fn, load_err = load(patched)
     if not fn then
         return nil
@@ -3280,9 +3287,9 @@ local function wad_extract_strings(source_code)
     if not ok or type(w_tbl) ~= "table" then
         return nil
     end
-    -- Collect only printable-ASCII strings that look like identifiers or
-    -- known Roblox / Lua names; skip internal noise strings.
+    -- Collect printable-ASCII strings and build a lookup set for hint emission.
     local results = {}
+    local lookup = {}
     for idx = 1, #w_tbl do
         local s = w_tbl[idx]
         if type(s) == "string" and #s >= 2 then
@@ -3296,10 +3303,22 @@ local function wad_extract_strings(source_code)
             end
             if is_ascii then
                 table.insert(results, {idx = idx, val = s})
+                lookup[s] = true
             end
         end
     end
-    return results, #w_tbl
+    return results, #w_tbl, lookup
+end
+
+-- Emit clipboard-related preamble lines when the string pool contains the
+-- clipboard API names used by WeAreDevs-obfuscated Roblox scripts.
+local function wad_emit_clipboard_hints(lookup)
+    if not lookup then return end
+    if lookup["setclipboard"] or lookup["toclipboard"] or lookup["Clipboard"] then
+        az("Clipboard API detected in string pool:")
+        at("local setclip = setclipboard or toclipboard or (Clipboard and Clipboard.set)")
+        aA()
+    end
 end
 
 function q.dump_file(eN, eO)
@@ -3316,7 +3335,7 @@ function q.dump_file(eN, eO)
     if al:find("wearedevs%.net/obfuscator", 1, false) then
         az("WeAreDevs v1.0.0 obfuscation detected")
         B("[Dumper] WeAreDevs obfuscation detected – extracting string table...")
-        local wad_strings, wad_total = wad_extract_strings(al)
+        local wad_strings, wad_total, wad_lookup = wad_extract_strings(al)
         if wad_strings then
             az(string.format("String pool: %d total entries, %d readable ASCII strings",
                 wad_total or 0, #wad_strings))
@@ -3325,12 +3344,13 @@ function q.dump_file(eN, eO)
                 az(string.format("  [%d] = %q", entry.idx, entry.val))
             end
             aA()
+            -- Emit preamble hints derived from the string pool
+            wad_emit_clipboard_hints(wad_lookup)
         else
             az("String pool extraction failed – running execution trace only")
         end
     end
     B("[Dumper] Sanitizing Luau and Binary Literals...")
-    local eP = I(al)
     local eP = I(al)
     local R, eQ = e(eP, "Obfuscated_Script")
     if not R then

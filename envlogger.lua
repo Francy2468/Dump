@@ -22,7 +22,7 @@ local r = {
     OUTPUT_FILE = "dumped_output.lua",
     VERBOSE = false,
     TRACE_CALLBACKS = true,
-    TIMEOUT_SECONDS = 10,
+    TIMEOUT_SECONDS = 55,
     MAX_REPEATED_LINES = 6,
     MIN_DEOBF_LENGTH = 150,
     MAX_OUTPUT_SIZE = 50 * 1024 * 1024,
@@ -3786,7 +3786,8 @@ function q.get_stats()
         total_lines = #t.output,
         remote_calls = #t.call_graph,
         suspicious_strings = #t.string_refs,
-        proxies_created = t.proxy_id
+        proxies_created = t.proxy_id,
+        loops = t.lar_counter
     }
 end
 local eE = {
@@ -4103,10 +4104,11 @@ if arg and arg[1] then
         local eV = q.get_stats()
         B(
             string.format(
-                "Lines: %d | Remotes: %d | Strings: %d",
+                "Lines: %d | Remotes: %d | Strings: %d | Loops: %d",
                 eV.total_lines,
                 eV.remote_calls,
-                eV.suspicious_strings
+                eV.suspicious_strings,
+                eV.loops
             )
         )
     end

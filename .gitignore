@@ -1,0 +1,11 @@
+# Environment / secrets
+.env
+
+# Lua temp files produced by the dumper
+input_*.lua
+output_*.lua
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo

@@ -7,7 +7,7 @@ A Lua script dumper/deobfuscator for Roblox scripts.
 Every dump produced by this tool includes a watermark comment at the top of the output file:
 
 ```
--- generated with catmio
+-- generated with catmio | https://discord.gg/cq9GkRKX2V
 ```
 
 ## Usage

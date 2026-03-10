@@ -4367,7 +4367,7 @@ end
 function q.dump_file(eN, eO)
     if not eN then return false end
     q.reset()
-    az("generated with catmio")
+    az("generated with catmio | https://discord.gg/cq9GkRKX2V")
     local as = o.open(eN, "rb")
     if not as then
         return false
@@ -4521,7 +4521,7 @@ function q.dump_file(eN, eO)
 end
 function q.dump_string(al, eO)
     q.reset()
-    az("generated with catmio")
+    az("generated with catmio | https://discord.gg/cq9GkRKX2V")
     aA()
     if al then
         al = I(al)

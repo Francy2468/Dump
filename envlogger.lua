@@ -3357,10 +3357,38 @@ function q.dump_file(eN, eO)
         B("\n[LUA_LOAD_FAIL] " .. m(eQ))
         return false
     end
+    -- Luau table-as-iterator compatibility metatable.
+    -- In Luau, `for k,v in plain_table do` is valid.  The WeAreDevs VM implements
+    -- Luau's generic-for with the standard Lua protocol:
+    --   (f, s, init) = FORGPREP(t)   → f=t (table is the iterator), s=nil, init=nil
+    --   k, v = f(s, prev_key)        → called as t(nil, prev_key) each step
+    -- __call receives (self, state, prev_key) and delegates to next(self, prev_key):
+    --   t(nil, nil)  → next(t, nil)  → (key1, val1)   first iteration
+    --   t(nil, key1) → next(t, key1) → (key2, val2)   second iteration
+    --   t(nil, keyN) → next(t, keyN) → nil            loop terminates
+    local _luau_iter_mt = {
+        __call = function(self, _state, prev_key)
+            return next(self, prev_key)
+        end
+    }
     local eR =
         setmetatable(
         {LuraphContinue = function()
-            end, script = script, game = game, workspace = workspace, LARRY_CHECKINDEX = function(x, ba)
+            end, script = script, game = game, workspace = workspace,
+            -- newproxy compatibility: WeAreDevs uses newproxy(true) to create
+            -- mutable-metatable upvalue boxes.  Lua 5.4 has no newproxy, so we
+            -- return a plain table whose metatable is already writeable.  We also
+            -- pre-install __call so the box can be iterated if the VM ever calls it.
+            newproxy = function(has_meta)
+                if not has_meta then
+                    return {}
+                end
+                local proxy = {}
+                local mt = {__call = function(self, _state, prev_key) return next(self, prev_key) end}
+                a.setmetatable(proxy, mt)
+                return proxy
+            end,
+            LARRY_CHECKINDEX = function(x, ba)
                 local aF = x[ba]
                 if j(aF) == "table" and not t.registry[aF] then
                     t.lar_counter = (t.lar_counter or 0) + 1
@@ -3387,14 +3415,39 @@ function q.dump_file(eN, eO)
     end
     B("[Dumper] Executing Protected VM...")
     local eT = p.clock()
+    -- Combined debug hook:
+    --   1. Enforce the execution time-out.
+    --   2. Luau compat: scan locals in the active WeAreDevs VM dispatch frames and
+    --      add __call to any plain table (no metatable).  In Luau, `for k,v in t`
+    --      calls the table on each step with the previous key; we delegate to
+    --      `next(t, prev_key)` so iteration works in standard Lua 5.4.
+    --      Interval 10 gives enough headroom: the shortest gap between a NEWTABLE
+    --      instruction and its FORGPREP caller is ~5 instructions in Luau bytecode,
+    --      so every plain table is patched well before the VM attempts to call it.
     b(
         function()
             if p.clock() - eT > r.TIMEOUT_SECONDS then
                 error("TIMEOUT", 0)
             end
+            -- Only scan levels that are likely to contain WeAreDevs VM dispatch
+            -- locals.  Avoid going too deep to keep the hook lightweight.
+            for _level = 2, 6 do
+                local _info = a.getinfo(_level, "S")
+                if not _info then break end
+                local _idx = 1
+                while true do
+                    local _name, _val = a.getlocal(_level, _idx)
+                    if not _name then break end
+                    if j(_val) == "table" and not a.getmetatable(_val) then
+                        a.setmetatable(_val, _luau_iter_mt)
+                    end
+                    _idx = _idx + 1
+                    if _idx > 40 then break end  -- WeAreDevs dispatch has ≤35 locals
+                end
+            end
         end,
         "",
-        1000
+        10
     )
     local eo, eU =
         h(

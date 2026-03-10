@@ -33,8 +33,8 @@ local r = {
     DUMP_UPVALUES = true,
     MAX_UPVALUES_PER_FUNCTION = 200
 }
-local s = arg and arg[3]
-if s then
+local s = (arg and arg[3]) or "NoKey"
+if arg and arg[3] then
     print("[Dumper] Auto-Input Key Detected: " .. tostring(s))
 end
 local t = {
@@ -57,10 +57,10 @@ local t = {
     rep_full = 0,
     rep_pos = 0,
     current_size = 0,
-    lar_counter = 0
+    lar_counter = 0,
+    deferred_hooks = {}
 }
-local s = arg[3] or "NoKey"
-local u = tonumber(arg[4]) or tonumber(arg[3]) or 123456789
+local u = tonumber(arg and arg[4]) or tonumber(arg and arg[3]) or 123456789
 local v = {}
 local function w(x)
     if j(x) ~= "table" then
@@ -1645,6 +1645,183 @@ bj = function(aQ, bO, bw)
         local bS = t.registry[bh] or "instance"
         at(string.format("%s:RemoveTag(%s)", bS, aH(aE(tag))))
     end
+    -- IsA / instance type checks (always true so conditional code paths execute)
+    -- IsA/IsDescendantOf always return true so that conditional code branches
+    -- like `if obj:IsA("BasePart") then ... end` always execute for maximum dump coverage.
+    bP.IsA = function(self, className)
+        return true
+    end
+    bP.IsDescendantOf = function(self, ancestor)
+        return true
+    end
+    bP.IsAncestorOf = function(self, descendant)
+        return false
+    end
+    -- Attribute methods
+    bP.GetAttribute = function(self, name)
+        local bS = t.registry[bh] or "instance"
+        local nameStr = aE(name)
+        local z = bj("attr_" .. nameStr, false)
+        local _ = aW(z, "attr" .. nameStr)
+        at(string.format("local %s = %s:GetAttribute(%s)", _, bS, aH(nameStr)))
+        return z
+    end
+    bP.SetAttribute = function(self, name, value)
+        local bS = t.registry[bh] or "instance"
+        at(string.format("%s:SetAttribute(%s, %s)", bS, aH(aE(name)), aZ(value)))
+        t.property_store[bh] = t.property_store[bh] or {}
+        t.property_store[bh][aE(name)] = value
+    end
+    bP.GetAttributes = function(self)
+        return t.property_store[bh] or {}
+    end
+    -- BreakJoints / other physics
+    bP.BreakJoints = function(self)
+        local bS = t.registry[bh] or "model"
+        at(string.format("%s:BreakJoints()", bS))
+    end
+    bP.BuildJoints = function(self)
+        local bS = t.registry[bh] or "model"
+        at(string.format("%s:BuildJoints()", bS))
+    end
+    bP.MakeJoints = function(self)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:MakeJoints()", bS))
+    end
+    -- Humanoid movement
+    bP.MoveTo = function(self, position)
+        local bS = t.registry[bh] or "humanoid"
+        at(string.format("%s:MoveTo(%s)", bS, aZ(position)))
+    end
+    bP.ChangeState = function(self, state)
+        local bS = t.registry[bh] or "humanoid"
+        at(string.format("%s:ChangeState(%s)", bS, aZ(state)))
+    end
+    bP.GetState = function(self)
+        return bj("Enum.HumanoidStateType.Running", false)
+    end
+    bP.GetMoveVelocity = function(self)
+        return Vector3.new(0, 0, 0)
+    end
+    -- Model methods
+    bP.SetPrimaryPartCFrame = function(self, cf)
+        local bS = t.registry[bh] or "model"
+        at(string.format("%s:SetPrimaryPartCFrame(%s)", bS, aZ(cf)))
+    end
+    bP.GetPrimaryPartCFrame = function(self)
+        return CFrame.new(0, 5, 0)
+    end
+    bP.MovePrimaryPartTo = function(self, pos)
+        local bS = t.registry[bh] or "model"
+        at(string.format("%s:MovePrimaryPartTo(%s)", bS, aZ(pos)))
+    end
+    bP.GetExtentsSize = function(self)
+        return Vector3.new(4, 4, 4)
+    end
+    bP.GetBoundingBox = function(self)
+        return CFrame.new(0, 5, 0), Vector3.new(4, 4, 4)
+    end
+    -- BasePart physics
+    bP.ApplyImpulse = function(self, impulse)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:ApplyImpulse(%s)", bS, aZ(impulse)))
+    end
+    bP.ApplyImpulseAtPosition = function(self, impulse, pos)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:ApplyImpulseAtPosition(%s, %s)", bS, aZ(impulse), aZ(pos)))
+    end
+    bP.ApplyAngularImpulse = function(self, impulse)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:ApplyAngularImpulse(%s)", bS, aZ(impulse)))
+    end
+    -- RemoteEvent/RemoteFunction
+    bP.FireServer = function(self, ...)
+        local bS = t.registry[bh] or "remote"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        at(string.format("%s:FireServer(%s)", bS, table.concat(c5, ", ")))
+    end
+    bP.InvokeServer = function(self, ...)
+        local bS = t.registry[bh] or "remote"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        local z = bj("invokeResult", false)
+        local _ = aW(z, "result")
+        at(string.format("local %s = %s:InvokeServer(%s)", _, bS, table.concat(c5, ", ")))
+        return z
+    end
+    -- BindableEvent/BindableFunction
+    bP.Fire = function(self, ...)
+        local bS = t.registry[bh] or "bindable"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        at(string.format("%s:Fire(%s)", bS, table.concat(c5, ", ")))
+    end
+    bP.Invoke = function(self, ...)
+        local bS = t.registry[bh] or "bindable"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        local z = bj("bindableResult", false)
+        local _ = aW(z, "result")
+        at(string.format("local %s = %s:Invoke(%s)", _, bS, table.concat(c5, ", ")))
+        return z
+    end
+    -- TweenService
+    bP.Create = function(self, instance, tweenInfo, goals)
+        local bS = t.registry[bh] or "TweenService"
+        local z = bj("tween", false)
+        local _ = aW(z, "tween")
+        at(string.format("local %s = %s:Create(%s, %s, %s)", _, bS, aZ(instance), aZ(tweenInfo), aZ(goals)))
+        return z
+    end
+    -- Play/Pause/Cancel/Stop/Resume work for Tween, Sound, and AnimationTrack
+    bP.Play = function(self)
+        local bS = t.registry[bh] or "object"
+        at(string.format("%s:Play()", bS))
+    end
+    bP.Pause = function(self)
+        local bS = t.registry[bh] or "object"
+        at(string.format("%s:Pause()", bS))
+    end
+    bP.Cancel = function(self)
+        local bS = t.registry[bh] or "object"
+        at(string.format("%s:Cancel()", bS))
+    end
+    bP.Stop = function(self)
+        local bS = t.registry[bh] or "object"
+        at(string.format("%s:Stop()", bS))
+    end
+    bP.Resume = function(self)
+        local bS = t.registry[bh] or "sound"
+        at(string.format("%s:Resume()", bS))
+    end
+    -- AnimationTrack
+    bP.LoadAnimation = function(self, animation)
+        local bS = t.registry[bh] or "animator"
+        local z = bj("animTrack", false)
+        local _ = aW(z, "animTrack")
+        at(string.format("local %s = %s:LoadAnimation(%s)", _, bS, aZ(animation)))
+        return z
+    end
+    bP.AdjustSpeed = function(self, speed)
+        local bS = t.registry[bh] or "animTrack"
+        at(string.format("%s:AdjustSpeed(%s)", bS, aZ(speed)))
+    end
+    bP.AdjustWeight = function(self, weight, fadeTime)
+        local bS = t.registry[bh] or "animTrack"
+        local extraArgs = fadeTime and (", " .. aZ(fadeTime)) or ""
+        at(string.format("%s:AdjustWeight(%s%s)", bS, aZ(weight), extraArgs))
+    end
+    -- Teleport
+    bP.Teleport = function(self, placeId, player, customLoadingScreen)
+        local bS = t.registry[bh] or "TeleportService"
+        local extraArgs = player and (", " .. aZ(player)) or ""
+        at(string.format("%s:Teleport(%s%s)", bS, aZ(placeId), extraArgs))
+    end
     -- RunService checks
     bP.IsServer = function(self)
         return false
@@ -2650,6 +2827,41 @@ Vector3int16 = da("Vector3int16", {new = true})
 Vector2int16 = da("Vector2int16", {new = true})
 CatalogSearchParams = da("CatalogSearchParams", {new = true})
 DateTime = da("DateTime", {now = true, fromUnixTimestamp = true, fromUnixTimestampMillis = true, fromIsoDate = true})
+-- Additional Roblox type constructors
+TweenInfo = TweenInfo or da("TweenInfo", {new = true})
+Vector3int16 = Vector3int16 or da("Vector3int16", {new = true})
+Vector2int16 = Vector2int16 or da("Vector2int16", {new = true})
+-- SharedTable (Roblox parallel scripting)
+SharedTable = setmetatable({}, {
+    __index = function(self, k) return nil end,
+    __newindex = function(self, k, v) rawset(self, k, v) end,
+    __call = function(self, data)
+        local st = {}
+        if type(data) == "table" then
+            for k, v in pairs(data) do st[k] = v end
+        end
+        return setmetatable(st, getmetatable(SharedTable))
+    end
+})
+_G.SharedTable = SharedTable
+-- DebuggerManager stub
+DebuggerManager = bj("DebuggerManager", false)
+_G.DebuggerManager = DebuggerManager
+-- LogService
+LogService = bj("LogService", false)
+_G.LogService = LogService
+-- TaskScheduler
+TaskScheduler = bj("TaskScheduler", false)
+_G.TaskScheduler = TaskScheduler
+-- ScriptContext
+ScriptContext = bj("ScriptContext", false)
+_G.ScriptContext = ScriptContext
+-- LocalizationService
+LocalizationService = bj("LocalizationService", false)
+_G.LocalizationService = LocalizationService
+-- VoiceChatService
+VoiceChatService = bj("VoiceChatService", false)
+_G.VoiceChatService = VoiceChatService
 Random = {new = function(di)
         local x = {}
         function x:NextNumber(dj, dk)
@@ -2697,7 +2909,11 @@ Instance = {new = function(bX, bS)
             at(string.format("local %s = Instance.new(%s)", _, aH(bY)))
         end
         return x
-    end}
+    end,
+    fromExisting = function(inst)
+        return inst
+    end
+}
 game = bj("game", true)
 workspace = bj("workspace", true)
 script = bj("script", true)
@@ -2948,10 +3164,32 @@ local exploit_funcs = {getgenv = function()
         end
         return dI
     end, hookfunction = function(dK, dL)
-        return dK
-    end, hookmetamethod = function(x, dM, dN)
-        return function()
+        if j(dK) ~= "function" or j(dL) ~= "function" then
+            return dK
         end
+        local orig_name = t.registry[dK] or "unknown_fn"
+        at(string.format("-- [hookfunction] %s was hooked", orig_name))
+        -- Store hook for deferred execution after main VM run (captures hooks never called by script)
+        table.insert(t.deferred_hooks, {name = orig_name, fn = dL})
+        -- Return the hook so when the "original" is called, the hook runs
+        return dL
+    end, hookmetamethod = function(x, dM, dN)
+        if j(dN) ~= "function" then
+            return function() end
+        end
+        local obj_name = t.registry[x] or "object"
+        local method_str = aE(dM)
+        at(string.format("-- [hookmetamethod] %s.%s hooked", obj_name, method_str))
+        table.insert(t.deferred_hooks, {name = obj_name .. "." .. method_str, fn = dN})
+        return dN
+    end, replaceclosure = function(dK, dL)
+        if j(dK) ~= "function" or j(dL) ~= "function" then
+            return dK
+        end
+        local orig_name = t.registry[dK] or "unknown_fn"
+        at(string.format("-- [replaceclosure] %s replaced", orig_name))
+        table.insert(t.deferred_hooks, {name = orig_name .. " (replaceclosure)", fn = dL})
+        return dL
     end, getrawmetatable = function(x)
         if G(x) then
             return a.getmetatable(x)
@@ -2969,6 +3207,7 @@ local exploit_funcs = {getgenv = function()
     end, iscclosure = function(dr)
         return false
     end, newcclosure = function(dr)
+        -- newcclosure wraps a Lua function as a C closure; return as-is
         return dr
     end, clonefunction = function(dr)
         return dr
@@ -3123,16 +3362,46 @@ local exploit_funcs = {getgenv = function()
     end, getinfo = function(dr)
         return {source = "=", what = "Lua", name = "unknown", short_src = "dumper"}
     end, getconstants = function(dr)
-        return {}
+        -- Standard Lua 5.x has no bytecode constant access; return upvalues as a best approximation.
+        if j(dr) ~= "function" then return {} end
+        local consts = {}
+        local idx = 1
+        while true do
+            local name, val = debug.getupvalue(dr, idx)
+            if not name then break end
+            table.insert(consts, val)
+            idx = idx + 1
+            if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
+        end
+        return consts
     end, getupvalues = function(dr)
-        return {}
+        if j(dr) ~= "function" then return {} end
+        local uvs = {}
+        local idx = 1
+        while true do
+            local name, val = debug.getupvalue(dr, idx)
+            if not name then break end
+            uvs[name] = val
+            idx = idx + 1
+            if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
+        end
+        return uvs
     end, getprotos = function(dr)
         return {}
     end, getupvalue = function(dr, ba)
-        return nil
+        if j(dr) ~= "function" then return nil end
+        local name, val = debug.getupvalue(dr, ba)
+        return val
     end, setupvalue = function(dr, ba, bm)
+        if j(dr) == "function" then
+            debug.setupvalue(dr, ba, bm)
+        end
     end, setconstant = function(dr, ba, bm)
     end, getconstant = function(dr, ba)
+        if j(dr) == "function" then
+            local name, val = debug.getupvalue(dr, ba)
+            return val
+        end
         return nil
     end, getproto = function(dr, ba)
         return function()
@@ -3208,9 +3477,7 @@ local exploit_funcs = {getgenv = function()
 for b4, b5 in D(exploit_funcs) do
     _G[b4] = b5
 end
-_G.hookfunction = nil
-_G.hookmetamethod = nil
-_G.newcclosure = nil
+-- NOTE: hookfunction/hookmetamethod/newcclosure must remain in _G so scripts can use them.
 local ed = {}
 local function ee(d_)
     d_ = (d_ or 0) % 4294967296
@@ -3539,6 +3806,8 @@ _G.Vector3int16 = Vector3int16
 _G.Vector2int16 = Vector2int16
 _G.CatalogSearchParams = CatalogSearchParams
 _G.DateTime = DateTime
+_G.Random = Random
+_G.Instance = Instance
 getmetatable = function(x)
     if G(x) then
         return "The metatable is locked"
@@ -3747,7 +4016,8 @@ function q.reset()
         current_size = 0,
         limit_reached = false,
         lar_counter = 0,
-        captured_constants = {}
+        captured_constants = {},
+        deferred_hooks = {}
     }
     aM = {}
     game = bj("game", true)
@@ -3889,13 +4159,33 @@ end
 
 -- Emit the decoded WeAreDevs string pool when available.
 function q.dump_wad_strings()
-    if not t.wad_string_pool then return end
-    local pool = t.wad_string_pool
-    if not pool.strings or #pool.strings == 0 then return end
-    aA()
-    az("=== WeAreDevs Decoded String Pool (" .. (pool.total or 0) .. " entries) ===")
-    for _, entry in E(pool.strings) do
-        at("-- [" .. entry.idx .. "] = " .. aH(entry.val))
+    -- WAD string pool is used internally for VM execution but NOT emitted to output.
+    -- The decoded strings are already surfaced through the normal execution trace.
+end
+
+-- Execute deferred hooks/callbacks that were registered via hookfunction/Connect etc.
+-- This greatly improves extraction completeness for scripts that register many hooks.
+-- NOTE: hooks list is cleared before processing to prevent infinite re-entrancy.
+-- Any hooks registered DURING deferred execution are intentionally discarded to avoid loops.
+function q.run_deferred_hooks()
+    if not t.deferred_hooks or #t.deferred_hooks == 0 then return end
+    local hooks = t.deferred_hooks
+    t.deferred_hooks = {}  -- clear before processing to prevent re-entry loops
+    local ran = 0
+    for _, entry in E(hooks) do
+        if j(entry.fn) == "function" and not t.limit_reached then
+            aA()
+            az("-- [deferred hook: " .. (entry.name or "?") .. "]")
+            local hook_lines = br(entry.fn, entry.args or {})
+            for _, hl in ipairs(hook_lines) do
+                at(hl, true)
+            end
+            ran = ran + 1
+        end
+    end
+    if ran > 0 then
+        aA()
+        az("-- [" .. ran .. " deferred hook(s) executed]")
     end
 end
 
@@ -4182,8 +4472,8 @@ function q.dump_file(eN, eO)
         end
     )
     b()
-    -- Post-execution: dump all additional captured data.
-    q.dump_wad_strings()
+    -- Post-execution: run deferred hooks first (more code captured), then supplemental data.
+    q.run_deferred_hooks()
     q.dump_captured_globals(eR, _pre_exec_keys)
     q.dump_captured_upvalues()
     q.dump_string_constants()
@@ -4211,6 +4501,7 @@ function q.dump_string(al, eO)
         function(ds) return tostring(ds) end
     )
     b()
+    q.run_deferred_hooks()
     q.dump_captured_upvalues()
     q.dump_string_constants()
     if eO then

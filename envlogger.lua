@@ -17,17 +17,21 @@ local p = os
 local q = {}
 q.__index = q
 local r = {
-    MAX_DEPTH = 15,
-    MAX_TABLE_ITEMS = 150,
+    MAX_DEPTH = 50,
+    MAX_TABLE_ITEMS = 10000,
     OUTPUT_FILE = "dumped_output.lua",
     VERBOSE = false,
     TRACE_CALLBACKS = true,
     TIMEOUT_SECONDS = 55,
-    MAX_REPEATED_LINES = 6,
-    MIN_DEOBF_LENGTH = 150,
-    MAX_OUTPUT_SIZE = 50 * 1024 * 1024,
+    MAX_REPEATED_LINES = 25,
+    MIN_DEOBF_LENGTH = 50,
+    MAX_OUTPUT_SIZE = 200 * 1024 * 1024,
     CONSTANT_COLLECTION = true,
-    INSTRUMENT_LOGIC = true
+    INSTRUMENT_LOGIC = true,
+    DUMP_GLOBALS = true,
+    DUMP_ALL_STRINGS = true,
+    DUMP_UPVALUES = true,
+    MAX_UPVALUES_PER_FUNCTION = 200
 }
 local s = arg and arg[3]
 if s then
@@ -3790,6 +3794,111 @@ function q.get_stats()
         loops = t.lar_counter
     }
 end
+
+-- Dump captured global variables from the script's execution environment.
+-- Iterates over env_table (the sandboxed _ENV table) and eC (the real global
+-- table) and emits every key/value pair written by the script.
+function q.dump_captured_globals(env_table, baseline_keys)
+    if not r.DUMP_GLOBALS then return end
+    local function safe_key(gk)
+        return gk:match("^[%a_][%w_]*$") and gk or ("[" .. aH(gk) .. "]")
+    end
+    local found = 0
+    aA()
+    az("=== Captured Global Variables ===")
+    -- eC is the real global table (before it was wrapped by the eD proxy).
+    -- The script's global writes all end up in eC via eD.__newindex.
+    local sources = {}
+    if j(eC) == "table" then sources[1] = eC end
+    if j(env_table) == "table" then sources[#sources + 1] = env_table end
+    local already_emitted = {}
+    for _, src in E(sources) do
+        for gk, gv in D(src) do
+            if j(gk) == "string" and not baseline_keys[gk] and not already_emitted[gk] then
+                already_emitted[gk] = true
+                local gvt = j(gv)
+                local sk = safe_key(gk)
+                if gvt == "string" or gvt == "number" or gvt == "boolean" then
+                    at("-- global: " .. sk .. " = " .. aZ(gv))
+                    found = found + 1
+                elseif gvt == "table" then
+                    at("-- global table: " .. sk .. " = " .. aZ(gv, 0, {}, true))
+                    found = found + 1
+                elseif gvt == "function" then
+                    at("-- global function: " .. sk)
+                    found = found + 1
+                end
+            end
+        end
+    end
+    if found == 0 then
+        az("(no new globals detected)")
+    else
+        az("Total new globals: " .. found)
+    end
+end
+
+-- Extract and emit all upvalues from every function captured in the registry.
+function q.dump_captured_upvalues()
+    if not r.DUMP_UPVALUES then return end
+    if not a or not a.getupvalue then return end
+    local emitted = 0
+    aA()
+    az("=== Captured Upvalues ===")
+    local seen_funcs = {}
+    for obj, name in D(t.registry) do
+        if j(obj) == "function" and not seen_funcs[obj] then
+            seen_funcs[obj] = true
+            local idx = 1
+            while true do
+                local uv_name, uv_val = a.getupvalue(obj, idx)
+                if not uv_name then break end
+                local uvt = j(uv_val)
+                if uvt == "string" or uvt == "number" or uvt == "boolean" then
+                    at("-- upvalue [" .. name .. "][" .. uv_name .. "] = " .. aZ(uv_val))
+                    emitted = emitted + 1
+                elseif uvt == "table" and not t.registry[uv_val] then
+                    at("-- upvalue [" .. name .. "][" .. uv_name .. "] (table) = " .. aZ(uv_val, 0, {}, true))
+                    emitted = emitted + 1
+                end
+                idx = idx + 1
+                if idx > r.MAX_UPVALUES_PER_FUNCTION then break end
+            end
+        end
+    end
+    if emitted == 0 then
+        az("(no upvalues captured)")
+    else
+        az("Total upvalues: " .. emitted)
+    end
+end
+
+-- Emit a summary of all string constants collected during execution.
+function q.dump_string_constants()
+    if not r.DUMP_ALL_STRINGS then return end
+    if #t.string_refs == 0 then return end
+    aA()
+    az("=== Captured String Constants ===")
+    for si, sr in E(t.string_refs) do
+        local hint = sr.hint and (" [" .. sr.hint .. "]") or ""
+        local val = sr.full_length and (sr.value .. " (full length: " .. sr.full_length .. ")") or sr.value
+        at("-- string #" .. si .. hint .. ": " .. aH(val))
+    end
+    az("Total strings: " .. #t.string_refs)
+end
+
+-- Emit the decoded WeAreDevs string pool when available.
+function q.dump_wad_strings()
+    if not t.wad_string_pool then return end
+    local pool = t.wad_string_pool
+    if not pool.strings or #pool.strings == 0 then return end
+    aA()
+    az("=== WeAreDevs Decoded String Pool (" .. (pool.total or 0) .. " entries) ===")
+    for _, entry in E(pool.strings) do
+        at("-- [" .. entry.idx .. "] = " .. aH(entry.val))
+    end
+end
+
 local eE = {
     callId = "LARRY_",
     binaryOperatorNames = {
@@ -4013,6 +4122,11 @@ function q.dump_file(eN, eO)
     if setfenv then
         setfenv(R, eR)
     end
+    -- Snapshot the REAL global table (eC, not the eD proxy) before execution,
+    -- plus the sandbox keys, so we can detect what the script wrote afterwards.
+    local _pre_exec_keys = {}
+    for _k in D(eC) do _pre_exec_keys[_k] = true end
+    for _k in D(eR) do _pre_exec_keys[_k] = true end
     B("[Dumper] Executing Protected VM...")
     local eT = p.clock()
     local _is_wad = (t.wad_string_pool ~= nil)
@@ -4068,6 +4182,11 @@ function q.dump_file(eN, eO)
         end
     )
     b()
+    -- Post-execution: dump all additional captured data.
+    q.dump_wad_strings()
+    q.dump_captured_globals(eR, _pre_exec_keys)
+    q.dump_captured_upvalues()
+    q.dump_string_constants()
     return q.save(eO or r.OUTPUT_FILE)
 end
 function q.dump_string(al, eO)
@@ -4092,6 +4211,8 @@ function q.dump_string(al, eO)
         function(ds) return tostring(ds) end
     )
     b()
+    q.dump_captured_upvalues()
+    q.dump_string_constants()
     if eO then
         return q.save(eO)
     end

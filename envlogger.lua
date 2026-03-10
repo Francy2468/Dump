@@ -4321,6 +4321,8 @@ end
 local WAD_DECODE_BOUNDARY = "end end end return%(function%([^)]*%)"
 -- Length of the literal prefix "end end end" that we keep (11 chars, 0-indexed = 10).
 local WAD_DECODE_PREFIX_LEN = 10
+-- Strings that must not appear in the decoded pool output.
+local WAD_FILTERED_STRINGS = { ["DRo8JK7A99KoYN"] = true }
 local function wad_extract_strings(source_code)
     if not source_code:find("wearedevs%.net/obfuscator", 1, false) then
         return nil
@@ -4355,7 +4357,7 @@ local function wad_extract_strings(source_code)
                     break
                 end
             end
-            if is_ascii then
+            if is_ascii and not WAD_FILTERED_STRINGS[s] then
                 table.insert(results, {idx = idx, val = s})
                 lookup[s] = true
             end

@@ -294,7 +294,7 @@ local function at(O, au)
         local ay = "-- [CRITICAL] Dump stopped: File size limit exceeded."
         table.insert(t.output, ay)
         t.current_size = t.current_size + #ay
-        error("TIMEOUT_FORCED_BY_DUMPER: file size limit exceeded")
+        error("TIMEOUT_FORCED_BY_DUMPER: output size limit reached")
     end
     -- Cycle-aware repetition suppressor: detects repeating blocks of 1, 2 or 3 lines.
     -- t.rep_buf  : ring buffer holding the last 6 emitted lines (strings).
@@ -1163,10 +1163,6 @@ bj = function(aQ, bO, bw)
             c4 = {}
         elseif c3:match("MoveToFinished") then
             c4 = {"reached"}
-        elseif c3:match("HealthChanged") then
-            c4 = {"health"}
-        elseif c3:match("StateChanged") then
-            c4 = {"oldState", "newState"}
         elseif c3:match("FreeFalling") or c3:match("Jumping") then
             c4 = {"active"}
         elseif c3:match("Running") then
@@ -3259,7 +3255,7 @@ ed.bor = bit_bor
 ed.bxor = bit_bxor
 ed.lshift = bit_lshift
 ed.rshift = bit_rshift
-ed.bnot = function(a) return bit_bxor(a % 0x100000000, 0xFFFFFFFF) end
+ed.bnot = function(a) return bit_bxor(bit_band(a % 0x100000000, 0xFFFFFFFF), 0xFFFFFFFF) end
 ed.arshift = function(d_, U)
     local b5 = ee(d_ or 0)
     if b5 < 0 then
@@ -3930,9 +3926,10 @@ local function wad_extract_strings(source_code)
 end
 
 function q.dump_file(eN, eO)
+    if not eN then return false end
     q.reset()
     az("generated with catmio | https://discord.gg/cq9GkRKX2V")
-    az("source: " .. tostring(eN))
+    az("source: " .. eN)
     local as = o.open(eN, "rb")
     if not as then
         return false
@@ -4004,7 +4001,7 @@ function q.dump_file(eN, eO)
                 return eS[em](eS, ...)
             end, pcall = function(as, ...)
                 local dg = {g(as, ...)}
-                if not dg[1] and m(dg[2]):match("TIMEOUT") then
+                if not dg[1] and m(dg[2]):match("TIMEOUT_FORCED_BY_DUMPER") then
                     i(dg[2], 0)
                 end
                 return unpack(dg)

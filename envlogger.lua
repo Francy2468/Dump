@@ -22,7 +22,7 @@ local r = {
     OUTPUT_FILE = "dumped_output.lua",
     VERBOSE = false,
     TRACE_CALLBACKS = true,
-    TIMEOUT_SECONDS = 30,
+    TIMEOUT_SECONDS = 10,
     MAX_REPEATED_LINES = 6,
     MIN_DEOBF_LENGTH = 150,
     MAX_OUTPUT_SIZE = 50 * 1024 * 1024,
@@ -48,8 +48,10 @@ local t = {
     callback_depth = 0,
     pending_iterator = false,
     last_http_url = nil,
-    last_emitted_line = nil,
-    repetition_count = 0,
+    rep_buf = nil,
+    rep_n = 0,
+    rep_full = 0,
+    rep_pos = 0,
     current_size = 0,
     lar_counter = 0
 }
@@ -292,33 +294,87 @@ local function at(O, au)
         local ay = "-- [CRITICAL] Dump stopped: File size limit exceeded."
         table.insert(t.output, ay)
         t.current_size = t.current_size + #ay
-        error("DUMP_LIMIT_EXCEEDED")
+        error("TIMEOUT_FORCED_BY_DUMPER: file size limit exceeded")
     end
-    if aw == t.last_emitted_line then
-        t.repetition_count = t.repetition_count + 1
-        if t.repetition_count <= r.MAX_REPEATED_LINES then
-            table.insert(t.output, aw)
-            t.current_size = t.current_size + ax
-        elseif t.repetition_count == r.MAX_REPEATED_LINES + 1 then
-            local ay = av .. "-- [Repeated lines suppressed...]"
-            table.insert(t.output, ay)
-            t.current_size = t.current_size + #ay
+    -- Cycle-aware repetition suppressor: detects repeating blocks of 1, 2 or 3 lines.
+    -- t.rep_buf  : ring buffer holding the last 6 emitted lines (strings).
+    -- t.rep_n    : currently detected cycle length (0 = none).
+    -- t.rep_full : number of complete cycle repetitions observed so far.
+    -- t.rep_pos  : position within the current in-progress cycle repetition.
+    if not t.rep_buf then
+        t.rep_buf  = {}
+        t.rep_n    = 0
+        t.rep_full = 0
+        t.rep_pos  = 0
+    end
+    local buf = t.rep_buf
+    -- If we are currently inside a detected cycle, check whether aw continues it.
+    local suppressed = false
+    if t.rep_n > 0 then
+        local n = t.rep_n
+        -- The line we expect at this position is the one from the previous repetition.
+        local expected = #buf >= n and buf[#buf - n + 1] or nil
+        if aw == expected then
+            t.rep_pos = t.rep_pos + 1
+            if t.rep_pos >= n then          -- completed one more full repetition
+                t.rep_full = t.rep_full + 1
+                t.rep_pos  = 0
+            end
+            if t.rep_full > r.MAX_REPEATED_LINES then
+                suppressed = true
+                -- Emit a single notice at the start of the first suppressed repetition.
+                if t.rep_full == r.MAX_REPEATED_LINES + 1 and t.rep_pos == 0 then
+                    local ay = av .. string.format("-- [%d-line cycle suppressed ...]", n)
+                    table.insert(t.output, ay)
+                    t.current_size = t.current_size + #ay + 1
+                end
+            end
+        else
+            -- Cycle broken – fall through to normal emit + fresh cycle scan below.
+            t.rep_n    = 0
+            t.rep_full = 0
+            t.rep_pos  = 0
         end
-    else
-        t.last_emitted_line = aw
-        t.repetition_count = 0
+    end
+    if not suppressed then
+        -- Emit the line.
         table.insert(t.output, aw)
         t.current_size = t.current_size + ax
+        if r.VERBOSE then B(aw) end
     end
-    if r.VERBOSE and t.repetition_count <= 1 then
-        B(aw)
+    -- Always update ring buffer (even when suppressing) so the cycle bookkeeping
+    -- stays aligned with what the script would have emitted.
+    table.insert(buf, aw)
+    if #buf > 6 then table.remove(buf, 1) end
+    -- Scan for a new repeating cycle only when we are not already tracking one.
+    if not suppressed and t.rep_n == 0 and #buf >= 2 then
+        for n = 1, 3 do
+            if #buf >= 2 * n then
+                local ok = true
+                for i = 1, n do
+                    if buf[#buf - i + 1] ~= buf[#buf - n - i + 1] then
+                        ok = false; break
+                    end
+                end
+                if ok then
+                    t.rep_n    = n
+                    t.rep_full = 1   -- second complete repetition just finished
+                    t.rep_pos  = 0
+                    break
+                end
+            end
+        end
     end
 end
 local function az(O)
     at("-- " .. m(O or ""))
 end
 local function aA()
-    t.last_emitted_line = nil
+    -- Inserting a blank line breaks any active cycle.
+    t.rep_buf  = nil
+    t.rep_n    = 0
+    t.rep_full = 0
+    t.rep_pos  = 0
     table.insert(t.output, "")
 end
 local function aB()
@@ -358,7 +414,12 @@ end
 local function aH(aF)
     local O = aE(aF)
     local aI =
-        O:gsub("\\\\", "\\\\\\\\"):gsub('"', '\\\\"'):gsub("\n", "\n"):gsub("\\r", "\\\\r"):gsub("\\t", "\\\\t")
+        O:gsub("\\", "\\\\")
+         :gsub('"', '\\"')
+         :gsub("\n", "\\n")
+         :gsub("\r", "\\r")
+         :gsub("\t", "\\t")
+         :gsub("%z", "\\0")
     return '"' .. aI .. '"'
 end
 local aJ = {
@@ -1055,24 +1116,87 @@ bj = function(aQ, bO, bw)
             c4 = {"input", "gameProcessed"}
         elseif c3:match("CharacterAdded") or c3:match("CharacterRemoving") then
             c4 = {"character"}
+        elseif c3:match("CharacterAppearanceLoaded") then
+            c4 = {"character"}
         elseif c3:match("PlayerAdded") or c3:match("PlayerRemoving") then
             c4 = {"player"}
         elseif c3:match("Touched") then
+            c4 = {"hit"}
+        elseif c3:match("TouchEnded") then
             c4 = {"hit"}
         elseif c3:match("Heartbeat") or c3:match("RenderStepped") then
             c4 = {"deltaTime"}
         elseif c3:match("Stepped") then
             c4 = {"time", "deltaTime"}
-        elseif c3:match("Changed") then
-            c4 = {"property"}
+        -- Specific *Changed variants must come before the generic "Changed" catch-all.
+        elseif c3:match("HealthChanged") then
+            c4 = {"health"}
+        elseif c3:match("StateChanged") then
+            c4 = {"oldState", "newState"}
+        elseif c3:match("AttributeChanged") then
+            c4 = {"attribute"}
+        elseif c3:match("PropertyChanged") then
+            c4 = {"value"}
+        elseif c3:match("AncestryChanged") then
+            c4 = {"child", "parent"}
         elseif c3:match("ChildAdded") or c3:match("ChildRemoved") then
             c4 = {"child"}
         elseif c3:match("DescendantAdded") or c3:match("DescendantRemoving") then
             c4 = {"descendant"}
-        elseif c3:match("Died") or c3:match("MouseButton") or c3:match("Activated") then
+        elseif c3:match("Changed") then
+            c4 = {"property"}
+        elseif c3:match("Died") or c3:match("Activated") or c3:match("Deactivated") then
             c4 = {}
+        elseif c3:match("MouseButton1Click") or c3:match("MouseButton2Click") then
+            c4 = {}
+        elseif c3:match("MouseButton") then
+            c4 = {"x", "y"}
+        elseif c3:match("MouseEnter") or c3:match("MouseLeave") or c3:match("MouseMoved") then
+            c4 = {"x", "y"}
+        elseif c3:match("MouseWheelForward") or c3:match("MouseWheelBackward") then
+            c4 = {"x", "y"}
         elseif c3:match("FocusLost") then
             c4 = {"enterPressed", "inputObject"}
+        elseif c3:match("FocusGained") or c3:match("Focused") then
+            c4 = {"inputObject"}
+        elseif c3:match("TextChanged") then
+            c4 = {}
+        elseif c3:match("MoveToFinished") then
+            c4 = {"reached"}
+        elseif c3:match("HealthChanged") then
+            c4 = {"health"}
+        elseif c3:match("StateChanged") then
+            c4 = {"oldState", "newState"}
+        elseif c3:match("FreeFalling") or c3:match("Jumping") then
+            c4 = {"active"}
+        elseif c3:match("Running") then
+            c4 = {"speed"}
+        elseif c3:match("Seated") then
+            c4 = {"active", "seat"}
+        elseif c3:match("Equipped") or c3:match("Unequipped") then
+            c4 = {}
+        elseif c3:match("OnClientEvent") then
+            c4 = {"..."}
+        elseif c3:match("OnServerEvent") then
+            c4 = {"player", "..."}
+        elseif c3:match("Completed") or c3:match("DidLoop") or c3:match("Stopped") then
+            c4 = {}
+        elseif c3:match("PromptPurchaseFinished") then
+            c4 = {"player", "assetId", "isPurchased"}
+        elseif c3:match("PromptProductPurchaseFinished") then
+            c4 = {"player", "productId", "isPurchased"}
+        elseif c3:match("Triggered") or c3:match("TriggerEnded") then
+            c4 = {"player"}
+        elseif c3:match("Button1Down") or c3:match("Button1Up") then
+            c4 = {"x", "y"}
+        elseif c3:match("Button2Down") or c3:match("Button2Up") then
+            c4 = {"x", "y"}
+        elseif c3:match("Idle") then
+            c4 = {"deltaTime"}
+        elseif c3:match("Move") then
+            c4 = {"direction", "relativeToCamera"}
+        elseif c3:match("ReturnPressedFromOnScreenKeyboard") then
+            c4 = {}
         end
         at(string.format("local %s = %s:Connect(function(%s)", c2, bS, table.concat(c4, ", ")))
         t.indent = t.indent + 1
@@ -1375,7 +1499,11 @@ bj = function(aQ, bO, bw)
         at(string.format("%s:PlayLocalSound(%s)", bS, aZ(cH)))
     end
     bP.GetAsync = function(self, cI)
-        return "{}"
+        local bS = t.registry[bh] or "dataStore"
+        local z = bj("storedValue", false)
+        local _ = aW(z, "storedValue")
+        at(string.format("local %s = %s:GetAsync(%s)", _, bS, aZ(cI)))
+        return z
     end
     bP.PostAsync = function(self, cI, cJ)
         return "{}"
@@ -1408,6 +1536,483 @@ bj = function(aQ, bO, bw)
     bP.AddItem = function(self, cN, cO)
         local bS = t.registry[bh] or "Debris"
         at(string.format("%s:AddItem(%s, %s)", bS, aZ(cN), aZ(cO or 10)))
+    end
+    -- HttpService
+    bP.RequestAsync = function(self, dO)
+        local bS = t.registry[bh] or "HttpService"
+        local url = dO and (dO.Url or dO.url) or "unknown"
+        table.insert(t.string_refs, {value = url, hint = "HTTP RequestAsync"})
+        local x = bj("httpResult", false)
+        local _ = aW(x, "httpResult")
+        at(string.format("local %s = %s:RequestAsync(%s)", _, bS, aZ(dO)))
+        t.property_store[x] = {Success = true, StatusCode = 200, StatusMessage = "OK", Headers = {}, Body = "{}"}
+        return x
+    end
+    -- DataStoreService
+    bP.GetDataStore = function(self, name, scope)
+        local bS = t.registry[bh] or "DataStoreService"
+        local storeName = aE(name)
+        local x = bj(storeName .. "Store", false)
+        local _ = aW(x, storeName .. "Store")
+        if scope then
+            at(string.format("local %s = %s:GetDataStore(%s, %s)", _, bS, aH(storeName), aH(aE(scope))))
+        else
+            at(string.format("local %s = %s:GetDataStore(%s)", _, bS, aH(storeName)))
+        end
+        return x
+    end
+    bP.GetGlobalDataStore = function(self)
+        local bS = t.registry[bh] or "DataStoreService"
+        local x = bj("GlobalDataStore", false)
+        local _ = aW(x, "globalStore")
+        at(string.format("local %s = %s:GetGlobalDataStore()", _, bS))
+        return x
+    end
+    bP.GetOrderedDataStore = function(self, name, scope)
+        local bS = t.registry[bh] or "DataStoreService"
+        local storeName = aE(name)
+        local x = bj(storeName .. "OrderedStore", false)
+        local _ = aW(x, storeName .. "OrderedStore")
+        if scope then
+            at(string.format("local %s = %s:GetOrderedDataStore(%s, %s)", _, bS, aH(storeName), aH(aE(scope))))
+        else
+            at(string.format("local %s = %s:GetOrderedDataStore(%s)", _, bS, aH(storeName)))
+        end
+        return x
+    end
+    -- DataStore methods (SetAsync, UpdateAsync, RemoveAsync, IncrementAsync)
+    bP.SetAsync = function(self, key, value, userIds, options)
+        local bS = t.registry[bh] or "dataStore"
+        at(string.format("%s:SetAsync(%s, %s)", bS, aZ(key), aZ(value)))
+    end
+    bP.UpdateAsync = function(self, key, func)
+        local bS = t.registry[bh] or "dataStore"
+        at(string.format("%s:UpdateAsync(%s, function(oldValue)", bS, aZ(key)))
+        t.indent = t.indent + 1
+        if j(func) == "function" then
+            xpcall(function() func(nil) end, function() end)
+        end
+        t.indent = t.indent - 1
+        at("    return oldValue")
+        at("end)")
+    end
+    bP.RemoveAsync = function(self, key)
+        local bS = t.registry[bh] or "dataStore"
+        local z = bj("removedValue", false)
+        local _ = aW(z, "removedValue")
+        at(string.format("local %s = %s:RemoveAsync(%s)", _, bS, aZ(key)))
+        return z
+    end
+    bP.IncrementAsync = function(self, key, delta, userIds)
+        local bS = t.registry[bh] or "dataStore"
+        local z = bj("newValue", false)
+        local _ = aW(z, "newValue")
+        at(string.format("local %s = %s:IncrementAsync(%s, %s)", _, bS, aZ(key), aZ(delta or 1)))
+        return z
+    end
+    bP.ListKeysAsync = function(self, prefix, pageSize)
+        local bS = t.registry[bh] or "dataStore"
+        local z = bj("keyPages", false)
+        local _ = aW(z, "keyPages")
+        at(string.format("local %s = %s:ListKeysAsync(%s)", _, bS, aZ(prefix or "")))
+        return z
+    end
+    -- CollectionService
+    bP.GetTagged = function(self, tag)
+        local bS = t.registry[bh] or "CollectionService"
+        local z = bj("taggedInstances", false)
+        local _ = aW(z, "taggedInstances")
+        at(string.format("local %s = %s:GetTagged(%s)", _, bS, aH(aE(tag))))
+        return {}
+    end
+    bP.GetAllTags = function(self)
+        return {}
+    end
+    -- Instance tag methods
+    bP.GetTags = function(self)
+        return {}
+    end
+    bP.HasTag = function(self, tag)
+        return false
+    end
+    bP.AddTag = function(self, tag)
+        local bS = t.registry[bh] or "instance"
+        at(string.format("%s:AddTag(%s)", bS, aH(aE(tag))))
+    end
+    bP.RemoveTag = function(self, tag)
+        local bS = t.registry[bh] or "instance"
+        at(string.format("%s:RemoveTag(%s)", bS, aH(aE(tag))))
+    end
+    -- RunService checks
+    bP.IsServer = function(self)
+        return false
+    end
+    bP.IsClient = function(self)
+        return true
+    end
+    bP.IsStudio = function(self)
+        return false
+    end
+    bP.IsRunMode = function(self)
+        return true
+    end
+    bP.IsEdit = function(self)
+        return false
+    end
+    -- UserInputService
+    bP.IsKeyDown = function(self, key)
+        return false
+    end
+    bP.IsMouseButtonPressed = function(self, button)
+        return false
+    end
+    bP.GetKeysPressed = function(self)
+        return {}
+    end
+    bP.GetMouseButtonsPressed = function(self)
+        return {}
+    end
+    bP.GetMouseLocation = function(self)
+        return Vector2.new(0, 0)
+    end
+    bP.GetNavigationGamepads = function(self)
+        return {}
+    end
+    bP.GetSupportedGamepadKeyCodes = function(self, gamepadNum)
+        return {}
+    end
+    bP.SetNavigationGamepad = function(self, gamepadNum, enabled)
+    end
+    bP.GetGamepadConnected = function(self, gamepadNum)
+        return false
+    end
+    bP.GetGamepadState = function(self, gamepadNum)
+        return {}
+    end
+    -- MarketplaceService
+    bP.PromptPurchase = function(self, player, assetId, equip)
+        local bS = t.registry[bh] or "MarketplaceService"
+        at(string.format("%s:PromptPurchase(%s, %s)", bS, aZ(player), aZ(assetId)))
+    end
+    bP.PromptProductPurchase = function(self, player, productId, equipIfPurchased, currencyType)
+        local bS = t.registry[bh] or "MarketplaceService"
+        at(string.format("%s:PromptProductPurchase(%s, %s)", bS, aZ(player), aZ(productId)))
+    end
+    bP.PromptGamePassPurchase = function(self, player, gamePassId)
+        local bS = t.registry[bh] or "MarketplaceService"
+        at(string.format("%s:PromptGamePassPurchase(%s, %s)", bS, aZ(player), aZ(gamePassId)))
+    end
+    bP.GetProductInfo = function(self, assetId, infoType)
+        return {Name = "Product", PriceInRobux = 0, Description = "", AssetId = assetId or 0, IsForSale = true}
+    end
+    bP.UserOwnsGamePassAsync = function(self, userId, gamePassId)
+        return false
+    end
+    bP.PlayerOwnsAsset = function(self, player, assetId)
+        return false
+    end
+    -- PathfindingService
+    bP.CreatePath = function(self, options)
+        local bS = t.registry[bh] or "PathfindingService"
+        local z = bj("path", false)
+        local _ = aW(z, "path")
+        if options then
+            at(string.format("local %s = %s:CreatePath(%s)", _, bS, aZ(options)))
+        else
+            at(string.format("local %s = %s:CreatePath()", _, bS))
+        end
+        return z
+    end
+    bP.ComputeAsync = function(self, startPos, goalPos)
+        local bS = t.registry[bh] or "path"
+        at(string.format("%s:ComputeAsync(%s, %s)", bS, aZ(startPos), aZ(goalPos)))
+    end
+    bP.GetWaypoints = function(self)
+        return {}
+    end
+    bP.CheckOcclusionAsync = function(self, start)
+        return -1
+    end
+    -- MessagingService
+    bP.PublishAsync = function(self, topic, message)
+        local bS = t.registry[bh] or "MessagingService"
+        at(string.format("%s:PublishAsync(%s, %s)", bS, aH(aE(topic)), aZ(message)))
+    end
+    bP.SubscribeAsync = function(self, topic, callback)
+        local bS = t.registry[bh] or "MessagingService"
+        local topicStr = aH(aE(topic))
+        local c1 = bj("subscription", false)
+        local c2 = aW(c1, "sub")
+        at(string.format("local %s = %s:SubscribeAsync(%s, function(message)", c2, bS, topicStr))
+        t.indent = t.indent + 1
+        if j(callback) == "function" then
+            xpcall(function() callback({Data = "", Sent = 0}) end, function() end)
+        end
+        t.indent = t.indent - 1
+        at("end)")
+        return c1
+    end
+    -- TextService
+    bP.FilterStringAsync = function(self, text, fromUserId, textContext)
+        local bS = t.registry[bh] or "TextService"
+        local z = bj("filteredText", false)
+        local _ = aW(z, "filteredText")
+        at(string.format("local %s = %s:FilterStringAsync(%s, %s)", _, bS, aZ(text), aZ(fromUserId)))
+        return z
+    end
+    bP.GetStringForBroadcast = function(self)
+        return ""
+    end
+    bP.GetNonChatStringForBroadcastAsync = function(self)
+        return ""
+    end
+    -- TeleportService additional
+    bP.TeleportAsync = function(self, placeId, players, teleportOptions)
+        local bS = t.registry[bh] or "TeleportService"
+        if teleportOptions then
+            at(string.format("%s:TeleportAsync(%s, %s, %s)", bS, aZ(placeId), aZ(players), aZ(teleportOptions)))
+        else
+            at(string.format("%s:TeleportAsync(%s, %s)", bS, aZ(placeId), aZ(players)))
+        end
+    end
+    bP.ReserveServer = function(self, placeId)
+        local bS = t.registry[bh] or "TeleportService"
+        local z = bj("reservedCode", false)
+        local _ = aW(z, "reservedCode")
+        at(string.format("local %s = %s:ReserveServer(%s)", _, bS, aZ(placeId)))
+        return z
+    end
+    -- Instance network ownership
+    bP.GetNetworkOwner = function(self)
+        return bj("LocalPlayer", false)
+    end
+    bP.GetNetworkOwnership = function(self)
+        return bj("LocalPlayer", false), true
+    end
+    bP.SetNetworkOwner = function(self, player)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:SetNetworkOwner(%s)", bS, aZ(player)))
+    end
+    bP.SetNetworkOwnershipAuto = function(self)
+        local bS = t.registry[bh] or "part"
+        at(string.format("%s:SetNetworkOwnershipAuto()", bS))
+    end
+    -- Animation track
+    bP.GetTimeOfKeyframe = function(self, keyframeName)
+        return 0
+    end
+    bP.GetMarkerReachedSignal = function(self, name)
+        local bS = t.registry[bh] or "animTrack"
+        local cg = bj(bS .. ".GetMarkerReachedSignal", false)
+        t.registry[cg] = bS .. ":GetMarkerReachedSignal(" .. aH(aE(name)) .. ")"
+        return cg
+    end
+    -- SoundService / Sound
+    bP.PlaySound = function(self, sound)
+        local bS = t.registry[bh] or "SoundService"
+        at(string.format("%s:PlaySound(%s)", bS, aZ(sound)))
+    end
+    -- GuiService
+    bP.OpenBrowserWindow = function(self, url)
+        local bS = t.registry[bh] or "GuiService"
+        at(string.format("%s:OpenBrowserWindow(%s)", bS, aH(aE(url))))
+    end
+    bP.SetMenuOpen = function(self, open)
+        local bS = t.registry[bh] or "GuiService"
+        at(string.format("%s:SetMenuOpen(%s)", bS, aZ(open)))
+    end
+    bP.AddSelectionParent = function(self, selectionName, instance)
+        local bS = t.registry[bh] or "GuiService"
+        at(string.format("%s:AddSelectionParent(%s, %s)", bS, aH(aE(selectionName)), aZ(instance)))
+    end
+    -- ContentProvider
+    bP.PreloadAsync = function(self, instances, callback)
+        local bS = t.registry[bh] or "ContentProvider"
+        at(string.format("%s:PreloadAsync(%s)", bS, aZ(instances)))
+    end
+    -- Workspace spatial queries
+    bP.FindPartOnRay = function(self, ray, ignoreDescendantsInstance, terrainCellsAreCubes, ignoreWater)
+        local bS = t.registry[bh] or "workspace"
+        local z = bj("rayHit", false)
+        local _ = aW(z, "rayHit")
+        at(string.format("local %s = %s:FindPartOnRay(%s)", _, bS, aZ(ray)))
+        return z, Vector3.new(0, 0, 0), Vector3.new(0, 1, 0)
+    end
+    bP.FindPartOnRayWithIgnoreList = function(self, ray, ignoreList, terrainCellsAreCubes, ignoreWater)
+        local bS = t.registry[bh] or "workspace"
+        local z = bj("rayHit", false)
+        local _ = aW(z, "rayHit")
+        at(string.format("local %s = %s:FindPartOnRayWithIgnoreList(%s, %s)", _, bS, aZ(ray), aZ(ignoreList)))
+        return z, Vector3.new(0, 0, 0), Vector3.new(0, 1, 0)
+    end
+    bP.GetPartBoundsInBox = function(self, cf, size, params)
+        local bS = t.registry[bh] or "workspace"
+        at(string.format("workspace:GetPartBoundsInBox(%s, %s)", aZ(cf), aZ(size)))
+        return {}
+    end
+    bP.GetPartBoundsInRadius = function(self, pos, radius, params)
+        local bS = t.registry[bh] or "workspace"
+        at(string.format("workspace:GetPartBoundsInRadius(%s, %s)", aZ(pos), aZ(radius)))
+        return {}
+    end
+    bP.GetPartsInPart = function(self, part, params)
+        local bS = t.registry[bh] or "workspace"
+        at(string.format("workspace:GetPartsInPart(%s)", aZ(part)))
+        return {}
+    end
+    bP.BlockcastAsync = function(self, cf, size, direction, params)
+        local bS = t.registry[bh] or "workspace"
+        local z = bj("blockcastResult", false)
+        local _ = aW(z, "blockResult")
+        at(string.format("local %s = %s:Blockcast(%s, %s, %s)", _, bS, aZ(cf), aZ(size), aZ(direction)))
+        return z
+    end
+    bP.SphereCastAsync = function(self, origin, radius, direction, params)
+        local bS = t.registry[bh] or "workspace"
+        local z = bj("spherecastResult", false)
+        local _ = aW(z, "sphereResult")
+        at(string.format("local %s = %s:Spherecast(%s, %s, %s)", _, bS, aZ(origin), aZ(radius), aZ(direction)))
+        return z
+    end
+    -- Players additional
+    bP.CreateHumanoidDescription = function(self)
+        return bj("HumanoidDescription", false)
+    end
+    bP.GetCharacterAppearanceAsync = function(self, userId)
+        return bj("HumanoidDescription", false)
+    end
+    bP.GetFriendsAsync = function(self, userId)
+        local z = bj("friendPages", false)
+        local _ = aW(z, "friendPages")
+        local bS = t.registry[bh] or "Players"
+        at(string.format("local %s = %s:GetFriendsAsync(%s)", _, bS, aZ(userId)))
+        return z
+    end
+    -- OverlapParams helper
+    bP.GetCurrentCamera = function(self)
+        local bS = t.registry[bh] or "workspace"
+        local cX = bj("Camera", false, bh)
+        t.property_store[cX] = {CFrame = CFrame.new(0, 10, 0), FieldOfView = 70, ViewportSize = Vector2.new(1920, 1080)}
+        local _ = aW(cX, "camera")
+        at(string.format("local %s = %s.CurrentCamera", _, bS))
+        return cX
+    end
+    -- TweenService additional
+    bP.GetValue = function(self, alpha, easingStyle, easingDirection)
+        return alpha or 0
+    end
+    -- ContextActionService
+    bP.BindAction = function(self, actionName, funcToBind, createTouchButton, ...)
+        local bS = t.registry[bh] or "ContextActionService"
+        local keys = {...}
+        local keyStrs = {}
+        for _, k in ipairs(keys) do table.insert(keyStrs, aZ(k)) end
+        at(string.format("%s:BindAction(%s, function(actionName, inputState, inputObject)", bS, aH(aE(actionName))))
+        t.indent = t.indent + 1
+        if j(funcToBind) == "function" then
+            xpcall(function() funcToBind("actionName", nil, nil) end, function() end)
+        end
+        t.indent = t.indent - 1
+        at("end, " .. tostring(createTouchButton or false) .. (
+            #keyStrs > 0 and ", " .. table.concat(keyStrs, ", ") or ""
+        ) .. ")")
+    end
+    bP.UnbindAction = function(self, actionName)
+        local bS = t.registry[bh] or "ContextActionService"
+        at(string.format("%s:UnbindAction(%s)", bS, aH(aE(actionName))))
+    end
+    -- PhysicsService
+    bP.GetCollisionGroupId = function(self, name)
+        return 0
+    end
+    bP.CollisionGroupSetCollidable = function(self, name1, name2, collidable)
+        local bS = t.registry[bh] or "PhysicsService"
+        at(string.format("%s:CollisionGroupSetCollidable(%s, %s, %s)", bS, aH(aE(name1)), aH(aE(name2)), aZ(collidable)))
+    end
+    bP.RegisterCollisionGroup = function(self, name)
+        local bS = t.registry[bh] or "PhysicsService"
+        at(string.format("%s:RegisterCollisionGroup(%s)", bS, aH(aE(name))))
+    end
+    -- ProximityPromptService
+    bP.TriggerPrompt = function(self, prompt)
+        local bS = t.registry[bh] or "ProximityPromptService"
+        at(string.format("%s:TriggerPrompt(%s)", bS, aZ(prompt)))
+    end
+    -- InsertService
+    bP.LoadAsset = function(self, assetId)
+        local bS = t.registry[bh] or "InsertService"
+        local z = bj("loadedModel", false)
+        local _ = aW(z, "loadedModel")
+        at(string.format("local %s = %s:LoadAsset(%s)", _, bS, aZ(assetId)))
+        return z
+    end
+    bP.LoadAssetVersion = function(self, assetVersionId)
+        local bS = t.registry[bh] or "InsertService"
+        local z = bj("loadedModel", false)
+        local _ = aW(z, "loadedModel")
+        at(string.format("local %s = %s:LoadAssetVersion(%s)", _, bS, aZ(assetVersionId)))
+        return z
+    end
+    -- FireClient / FireAllClients (server-side)
+    bP.FireClient = function(self, player, ...)
+        local bS = t.registry[bh] or "remote"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        local argStr = #c5 > 0 and ", " .. table.concat(c5, ", ") or ""
+        at(string.format("%s:FireClient(%s%s)", bS, aZ(player), argStr))
+    end
+    bP.FireAllClients = function(self, ...)
+        local bS = t.registry[bh] or "remote"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        at(string.format("%s:FireAllClients(%s)", bS, table.concat(c5, ", ")))
+    end
+    bP.InvokeClient = function(self, player, ...)
+        local bS = t.registry[bh] or "remote"
+        local bA = {...}
+        local c5 = {}
+        for _, b5 in ipairs(bA) do table.insert(c5, aZ(b5)) end
+        local argStr = #c5 > 0 and ", " .. table.concat(c5, ", ") or ""
+        local z = bj("invokeResult", false)
+        local _ = aW(z, "result")
+        at(string.format("local %s = %s:InvokeClient(%s%s)", _, bS, aZ(player), argStr))
+        return z
+    end
+    -- Humanoid additional
+    bP.ApplyDescription = function(self, description)
+        local bS = t.registry[bh] or "humanoid"
+        at(string.format("%s:ApplyDescription(%s)", bS, aZ(description)))
+    end
+    bP.GetAppliedDescription = function(self)
+        return bj("HumanoidDescription", false)
+    end
+    bP.AddAccessory = function(self, accessory)
+        local bS = t.registry[bh] or "humanoid"
+        at(string.format("%s:AddAccessory(%s)", bS, aZ(accessory)))
+    end
+    bP.GetAccessories = function(self)
+        return {}
+    end
+    -- Model/Part manipulation
+    bP.WorldToObjectSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
+    end
+    bP.ObjectToWorldSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
+    end
+    bP.PointToObjectSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
+    end
+    bP.PointToWorldSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
+    end
+    bP.VectorToObjectSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
+    end
+    bP.VectorToWorldSpace = function(self, v3)
+        return v3 or Vector3.new(0, 0, 0)
     end
     bi.__index = function(b2, b4)
         if b4 == F or b4 == "__proxy_id" then
@@ -2649,6 +3254,12 @@ local function bit_rshift(a, b) return math.floor(a / (2 ^ b)) end
 
 _G.bit = {band = bit_band, bor = bit_bor, bxor = bit_bxor, lshift = bit_lshift, rshift = bit_rshift}
 _G.bit32 = _G.bit
+ed.band = bit_band
+ed.bor = bit_bor
+ed.bxor = bit_bxor
+ed.lshift = bit_lshift
+ed.rshift = bit_rshift
+ed.bnot = function(a) return bit_bxor(a % 0x100000000, 0xFFFFFFFF) end
 ed.arshift = function(d_, U)
     local b5 = ee(d_ or 0)
     if b5 < 0 then
@@ -2681,23 +3292,23 @@ ed.countlz = function(U)
         return 32
     end
     local a2 = 0
-    if ed.band(U, 0xFFFF0000) == 0 then
+    if bit_band(U, 0xFFFF0000) == 0 then
         a2 = a2 + 16
-        U = ed.lshift(U, 16)
+        U = bit_lshift(U, 16)
     end
-    if ed.band(U, 0xFF000000) == 0 then
+    if bit_band(U, 0xFF000000) == 0 then
         a2 = a2 + 8
-        U = ed.lshift(U, 8)
+        U = bit_lshift(U, 8)
     end
-    if ed.band(U, 0xF0000000) == 0 then
+    if bit_band(U, 0xF0000000) == 0 then
         a2 = a2 + 4
-        U = ed.lshift(U, 4)
+        U = bit_lshift(U, 4)
     end
-    if ed.band(U, 0xC0000000) == 0 then
+    if bit_band(U, 0xC0000000) == 0 then
         a2 = a2 + 2
-        U = ed.lshift(U, 2)
+        U = bit_lshift(U, 2)
     end
-    if ed.band(U, 0x80000000) == 0 then
+    if bit_band(U, 0x80000000) == 0 then
         a2 = a2 + 1
     end
     return a2
@@ -2708,8 +3319,8 @@ ed.countrz = function(U)
         return 32
     end
     local a2 = 0
-    while ed.band(U, 1) == 0 do
-        U = ed.rshift(U, 1)
+    while bit_band(U, 1) == 0 do
+        U = bit_rshift(U, 1)
         a2 = a2 + 1
     end
     return a2
@@ -2727,7 +3338,7 @@ ed.replace = function(U, b5, eg, eh)
     return bit_bor(bit_band(U, 4294967295 - mask), bit_band(bit_lshift(b5, eg), mask))
 end
 ed.btest = function(bo, aa)
-    return ed.band(bo, aa) ~= 0
+    return bit_band(bo, aa) ~= 0
 end
 bit32 = ed
 bit = ed
@@ -3013,7 +3624,20 @@ loadstring = function(al, eu)
         {pattern = "infinite", name = "InfiniteYield"},
         {pattern = "hydroxide", name = "Hydroxide"},
         {pattern = "simplespy", name = "SimpleSpy"},
-        {pattern = "remotespy", name = "RemoteSpy"}
+        {pattern = "remotespy", name = "RemoteSpy"},
+        {pattern = "fluent", name = "Fluent"},
+        {pattern = "octagon", name = "Octagon"},
+        {pattern = "sentinel", name = "Sentinel"},
+        {pattern = "darkdex", name = "DarkDex"},
+        {pattern = "pearlui", name = "PearlUI"},
+        {pattern = "windui", name = "WindUI"},
+        {pattern = "boho", name = "BohoUI"},
+        {pattern = "zzlib", name = "ZZLib"},
+        {pattern = "re%-member", name = "ReMember"},
+        {pattern = "elysian", name = "Elysian"},
+        {pattern = "uranium", name = "Uranium"},
+        {pattern = "custom%-ui", name = "CustomUI"},
+        {pattern = "getObjects", name = "GetObjects"}
     }
     for W, ey in ipairs(ex) do
         if ew:find(ey.pattern) then
@@ -3114,8 +3738,10 @@ function q.reset()
         callback_depth = 0,
         pending_iterator = false,
         last_http_url = nil,
-        last_emitted_line = nil,
-        repetition_count = 0,
+        rep_buf = nil,
+        rep_n = 0,
+        rep_full = 0,
+        rep_pos = 0,
         current_size = 0,
         limit_reached = false,
         lar_counter = 0,
@@ -3306,6 +3932,7 @@ end
 function q.dump_file(eN, eO)
     q.reset()
     az("generated with catmio | https://discord.gg/cq9GkRKX2V")
+    az("source: " .. tostring(eN))
     local as = o.open(eN, "rb")
     if not as then
         return false
@@ -3389,40 +4016,49 @@ function q.dump_file(eN, eO)
     end
     B("[Dumper] Executing Protected VM...")
     local eT = p.clock()
+    local _is_wad = (t.wad_string_pool ~= nil)
     -- Combined debug hook:
-    --   1. Enforce the execution time-out.
-    --   2. Luau compat: scan locals in the active WeAreDevs VM dispatch frames and
-    --      add __call to any plain table (no metatable).  In Luau, `for k,v in t`
-    --      calls the table on each step with the previous key; we delegate to
-    --      `next(t, prev_key)` so iteration works in standard Lua 5.4.
-    --      Interval 10 gives enough headroom: the shortest gap between a NEWTABLE
-    --      instruction and its FORGPREP caller is ~5 instructions in Luau bytecode,
-    --      so every plain table is patched well before the VM attempts to call it.
-    b(
-        function()
-            if p.clock() - eT > r.TIMEOUT_SECONDS then
-                error("TIMEOUT", 0)
-            end
-            -- Only scan levels that are likely to contain WeAreDevs VM dispatch
-            -- locals.  Avoid going too deep to keep the hook lightweight.
-            for _level = 2, 6 do
-                local _info = a.getinfo(_level, "S")
-                if not _info then break end
-                local _idx = 1
-                while true do
-                    local _name, _val = a.getlocal(_level, _idx)
-                    if not _name then break end
-                    if j(_val) == "table" and not a.getmetatable(_val) then
-                        a.setmetatable(_val, _luau_iter_mt)
-                    end
-                    _idx = _idx + 1
-                    if _idx > 40 then break end  -- WeAreDevs dispatch has ≤35 locals
+    --   1. Enforce the execution time-out (fires TIMEOUT_FORCED_BY_DUMPER so that
+    --      _G.pcall / _G.xpcall cannot silently swallow it).
+    --   2. Luau compat: only for WeAreDevs-obfuscated files — scan locals in the
+    --      active VM dispatch frames and add __call to any plain table so that
+    --      `for k,v in plain_table do` works in standard Lua 5.1/5.4.
+    --      The scan is skipped for non-WAD files to keep the hook lightweight.
+    if _is_wad then
+        b(
+            function()
+                if p.clock() - eT > r.TIMEOUT_SECONDS then
+                    error("TIMEOUT_FORCED_BY_DUMPER", 0)
                 end
-            end
-        end,
-        "",
-        10
-    )
+                for _level = 2, 6 do
+                    local _info = a.getinfo(_level, "S")
+                    if not _info then break end
+                    local _idx = 1
+                    while true do
+                        local _name, _val = a.getlocal(_level, _idx)
+                        if not _name then break end
+                        if j(_val) == "table" and not a.getmetatable(_val) then
+                            a.setmetatable(_val, _luau_iter_mt)
+                        end
+                        _idx = _idx + 1
+                        if _idx > 40 then break end
+                    end
+                end
+            end,
+            "",
+            10
+        )
+    else
+        b(
+            function()
+                if p.clock() - eT > r.TIMEOUT_SECONDS then
+                    error("TIMEOUT_FORCED_BY_DUMPER", 0)
+                end
+            end,
+            "",
+            50
+        )
+    end
     local eo, eU =
         h(
         function()
@@ -3435,6 +4071,25 @@ function q.dump_file(eN, eO)
     b()
     if not eo then
         az("Terminated: " .. eU)
+    end
+    -- Emit summary section
+    local eV = q.get_stats()
+    aA()
+    az(string.format("[Summary] Lines: %d | Remote calls: %d | Suspicious strings: %d | Proxies: %d",
+        eV.total_lines, eV.remote_calls, eV.suspicious_strings, eV.proxies_created))
+    if #t.string_refs > 0 then
+        aA()
+        az("[String References]")
+        for _, sr in ipairs(t.string_refs) do
+            az(string.format("  [%s] %s", sr.hint or "?", sr.value))
+        end
+    end
+    if #t.call_graph > 0 then
+        aA()
+        az("[Remote Calls]")
+        for _, cg in ipairs(t.call_graph) do
+            az(string.format("  [%s] %s", cg.type or "?", cg.name or "?"))
+        end
     end
     return q.save(eO or r.OUTPUT_FILE)
 end
@@ -3450,13 +4105,20 @@ function q.dump_string(al, eO)
         az("Load Error: " .. (an or "unknown"))
         return false, an
     end
-    xpcall(
-        function()
-            R()
-        end,
-        function()
+    local eT2 = p.clock()
+    b(function()
+        if p.clock() - eT2 > r.TIMEOUT_SECONDS then
+            error("TIMEOUT_FORCED_BY_DUMPER", 0)
         end
+    end, "", 50)
+    local eo2, eU2 = h(
+        function() R() end,
+        function(ds) return tostring(ds) end
     )
+    b()
+    if not eo2 and eU2 then
+        az("Terminated: " .. eU2)
+    end
     if eO then
         return q.save(eO)
     end
